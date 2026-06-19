@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AVFoundation
 import CoreAudio
 import os
@@ -10,6 +11,7 @@ class Recorder: NSObject, ObservableObject {
     private let deviceManager = AudioDeviceManager.shared
     private var deviceSwitchObserver: NSObjectProtocol?
     private var audioDeviceChangedObserver: NSObjectProtocol?
+    private var systemWakeObserver: NSObjectProtocol?
     private var isReconfiguring = false
     private let mediaController = MediaController.shared
     private let playbackController = PlaybackController.shared
@@ -38,6 +40,7 @@ class Recorder: NSObject, ObservableObject {
         super.init()
         setupDeviceSwitchObserver()
         setupAudioDeviceChangedObserver()
+        setupSystemWakeObserver()
         schedulePrepareForCurrentDevice(reason: "init")
     }
 
@@ -62,6 +65,24 @@ class Recorder: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self, !self.deviceManager.isRecordingActive else { return }
                 self.schedulePrepareForCurrentDevice(reason: "device-changed")
+            }
+        }
+    }
+
+    /// Rebuilds the prepared audio unit after the system wakes from sleep.
+    /// A sleep/wake cycle resets the CoreAudio HAL, leaving the cached AUHAL unit
+    /// "alive" but silent: it starts without error yet its input callback never
+    /// fires, so recordings come out as 0-frame files with no error surfaced.
+    /// Forcing a fresh prepare on wake prevents that empty-recording state.
+    private func setupSystemWakeObserver() {
+        systemWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.deviceManager.isRecordingActive else { return }
+                self.schedulePrepareForCurrentDevice(reason: "system-wake", forceRebuild: true)
             }
         }
     }
@@ -227,7 +248,7 @@ class Recorder: NSObject, ObservableObject {
         audioMeterUpdateTimer = timer
     }
 
-    private func schedulePrepareForCurrentDevice(reason: String) {
+    private func schedulePrepareForCurrentDevice(reason: String, forceRebuild: Bool = false) {
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             return
         }
@@ -244,6 +265,12 @@ class Recorder: NSObject, ObservableObject {
 
         audioSetupQueue.async { [logger] in
             do {
+                // The cached unit is reused across recordings; force a clean
+                // rebuild when the prior unit may be stale (e.g. after wake),
+                // since prepare() would otherwise short-circuit on it.
+                if forceRebuild {
+                    coreAudioRecorder.teardown()
+                }
                 try coreAudioRecorder.prepare(deviceID: deviceID)
             } catch {
                 logger.warning("Recorder prepare failed reason=\(reason, privacy: .public) deviceID=\(deviceID, privacy: .public) error=\(error, privacy: .public)")
@@ -304,6 +331,9 @@ class Recorder: NSObject, ObservableObject {
         }
         if let observer = audioDeviceChangedObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = systemWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         recorder?.teardown()
     }
