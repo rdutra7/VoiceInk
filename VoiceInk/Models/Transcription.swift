@@ -30,6 +30,9 @@ final class Transcription {
     @Attribute(originalName: "powerModeEmoji")
     var modeEmoji: String?
     var transcriptionStatus: String?
+    /// Categorizes the source. nil = legacy dictation. "meeting" = recorded via MeetingRecorder
+    /// (mic + system audio). Used for filtering in the history view.
+    var recordingType: String?
 
     init(text: String,
          duration: TimeInterval,
@@ -44,7 +47,8 @@ final class Transcription {
          aiRequestUserMessage: String? = nil,
          modeName: String? = nil,
          modeEmoji: String? = nil,
-         transcriptionStatus: TranscriptionStatus = .pending) {
+         transcriptionStatus: TranscriptionStatus = .pending,
+         recordingType: String? = nil) {
         self.id = UUID()
         self.text = text
         self.enhancedText = enhancedText
@@ -61,6 +65,7 @@ final class Transcription {
         self.modeName = modeName
         self.modeEmoji = modeEmoji
         self.transcriptionStatus = transcriptionStatus.rawValue
+        self.recordingType = recordingType
     }
 
     func markAsCanceledTranscription(

@@ -13,6 +13,7 @@ struct MenuBarView: View {
     @EnvironmentObject var aiService: AIService
     @ObservedObject private var modeManager = ModeManager.shared
     @ObservedObject var audioDeviceManager = AudioDeviceManager.shared
+    @ObservedObject private var meetingRecorderController = MeetingRecorderController.shared
     @AppStorage("hasCompletedOnboardingV2") private var hasCompletedOnboardingV2 = false
     @State private var launchAtLoginEnabled = LaunchAtLogin.isEnabled
     
@@ -127,7 +128,30 @@ struct MenuBarView: View {
                 menuBarManager.openHistoryWindow()
             }
             .keyboardShortcut("h", modifiers: [.command, .shift])
-            
+
+            Divider()
+
+            if meetingRecorderController.isRecording {
+                Button("Stop Meeting Recording") {
+                    Task {
+                        let mode = ModeManager.shared.currentEffectiveConfiguration
+                            ?? ModeManager.shared.enabledConfigurations.first
+                        guard let mode else { return }
+                        await meetingRecorderController.stop(
+                            modelContext: engine.modelContext,
+                            engine: engine,
+                            mode: mode
+                        )
+                    }
+                }
+            } else {
+                Button("Start Meeting Recording") {
+                    Task {
+                        await meetingRecorderController.start()
+                    }
+                }
+            }
+
             Button(menuBarManager.isMenuBarOnly ? "Show Dock Icon" : "Hide Dock Icon") {
                 menuBarManager.toggleMenuBarOnly()
             }

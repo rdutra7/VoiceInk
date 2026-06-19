@@ -27,12 +27,16 @@ class AudioFileQueueItem: Identifiable, ObservableObject {
     let id = UUID()
     let url: URL
     let filename: String
+    /// Categorizes the source so the resulting `Transcription` can be tagged
+    /// (e.g. "meeting" for MeetingRecorder output). nil = default dictation/import.
+    let recordingType: String?
 
     @Published var status: QueueItemStatus = .pending
     @Published var transcription: Transcription?
 
-    init(url: URL) {
+    init(url: URL, recordingType: String? = nil) {
         self.url = url
         self.filename = url.lastPathComponent
+        self.recordingType = recordingType
     }
 }

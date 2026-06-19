@@ -26,7 +26,9 @@ class AudioTranscriptionManager: ObservableObject {
     // MARK: - Queue Management
 
     /// Add one or more audio file URLs to the queue. Invalid files are silently skipped.
-    func addToQueue(urls: [URL]) {
+    /// Pass `recordingType` to tag the resulting `Transcription` (e.g. "meeting" for
+    /// files produced by MeetingRecorder).
+    func addToQueue(urls: [URL], recordingType: String? = nil) {
         for url in urls {
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             guard SupportedMedia.isSupported(url: url) else { continue }
@@ -37,7 +39,7 @@ class AudioTranscriptionManager: ObservableObject {
                 continue
             }
 
-            let item = AudioFileQueueItem(url: url)
+            let item = AudioFileQueueItem(url: url, recordingType: recordingType)
             queue.append(item)
         }
     }
@@ -247,6 +249,11 @@ class AudioTranscriptionManager: ObservableObject {
                     modeEmoji: modeMetadata.emoji
                 )
             }
+
+            if let recordingType = item.recordingType {
+                transcription.recordingType = recordingType
+            }
+            transcription.transcriptionStatus = TranscriptionStatus.completed.rawValue
 
             modelContext.insert(transcription)
             try modelContext.save()

@@ -19,7 +19,7 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>VoiceInk needs to interact with your browser to detect the current website for applying website-specific configurations.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>VoiceInk needs screen recording access to understand context from your screen for improved transcription accuracy.</string>
+	<string>VoiceInk needs screen recording access to understand context from your screen for improved transcription accuracy, and to capture system audio during meeting recordings (mic + speakers).</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
