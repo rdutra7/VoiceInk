@@ -6,7 +6,7 @@ description: Use when building, signing, deploying, or debugging the local Voice
 # VoiceInk — desenvolvimento, build, assinatura e deploy
 
 App de ditado macOS (fork pessoal). Build local sem conta Apple Developer. Este projeto tem
-**duas armadilhas recorrentes** que custaram horas e estão resolvidas abaixo — leia antes de mexer.
+**três armadilhas recorrentes** que custaram horas e estão resolvidas abaixo — leia antes de mexer.
 
 ## Layout & remotes
 
@@ -125,6 +125,31 @@ Após ~25h de uptime atravessando sleep/wake, o AUHAL do CoreAudio é resetado m
 `Recorder.swift` ganhou `setupSystemWakeObserver()` (NSWorkspace.didWakeNotification) que força
 `teardown()` + `prepare()` no wake. Se rebase/merge com upstream apagar isso, reaplicar.
 
+## ⚠️ Armadilha 3 — Screen Recording pede permissão em loop (grant TCC órfão)
+
+**Sintoma:** ao iniciar gravação de reunião (ScreenCaptureKit / meeting recorder), o macOS pede a
+permissão de Screen Recording **toda vez**, mesmo com o toggle LIGADO em Ajustes → Privacidade e
+Segurança → Screen & System Audio Recording. Ligar/desligar o toggle e reiniciar o app não resolve.
+
+**Por quê:** mesmo mecanismo da Armadilha 1, em outro serviço TCC. O registro de ScreenCapture ficou
+amarrado a uma assinatura antiga (ad-hoc) do app. O toggle em Ajustes só alterna o registro **velho**;
+o app assinado com o cert estável nunca ganha registro próprio, então `SCShareableContent` re-dispara
+o prompt a cada chamada. (Em 2026-07-07 havia 2 registros duplicados no TCC.)
+
+> Pista falsa: `spctl -a` retorna `rejected` para o app self-signed — é **esperado** (Gatekeeper não
+> confia no cert local) e NÃO é a causa. TCC não consulta o Gatekeeper.
+
+**Solução (re-grant único):**
+```bash
+osascript -e 'quit app "VoiceInk"'
+tccutil reset ScreenCapture com.prakashjoshipax.VoiceInk
+tccutil reset AudioCapture  com.prakashjoshipax.VoiceInk   # "System Audio Recording Only" (macOS 15+)
+open /Applications/VoiceInk.app
+```
+Depois: disparar a gravação de reunião → conceder no prompt → reiniciar o app → testar de novo.
+Com o cert estável, rebuilds futuros **não pedem de novo** (mesmo raciocínio da Armadilha 1).
+**NUNCA** resetar `Accessibility` junto — quebraria o grant saudável do hotkey.
+
 ## Troubleshooting rápido
 
 | Sintoma | Causa provável | Ação |
@@ -133,6 +158,7 @@ Após ~25h de uptime atravessando sleep/wake, o AUHAL do CoreAudio é resetado m
 | `codesign --deep` no bundle: `.cstemp No such file or directory` | temp órfão em build debug | `find APP -name '*.cstemp' -delete` e assinar inside-out |
 | `find-identity -v` mostra 0 válidas | cert untrusted (esperado) | assinar pelo hash mesmo assim |
 | Gravação sai vazia (0 frames) após dias ligado | AUHAL stale pós-wake | já corrigido na branch do fix; conferir `setupSystemWakeObserver` |
+| Screen Recording pede permissão em loop, toggle já ligado | registro TCC órfão de assinatura antiga | `tccutil reset ScreenCapture` + `AudioCapture` + re-grant único (Armadilha 3) |
 | App não abre após assinar | assinou só o bundle, não inside-out | re-assinar frameworks/dylibs primeiro |
 
 ## Verificação (sempre antes de declarar "feito")
