@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Carbon.HIToolbox
 
 @MainActor
 class RecordingShortcutManager: ObservableObject {
@@ -93,6 +94,11 @@ class RecordingShortcutManager: ObservableObject {
 
     init(engine: VoiceInkEngine, recorderUIManager: RecorderUIManager) {
         ShortcutMigration.migrateLegacyShortcutsIfNeeded()
+
+        ShortcutStore.seedShortcut(
+            .key(keyCode: UInt16(kVK_ANSI_M), modifierFlags: [.control, .option, .command]),
+            for: .toggleMeetingRecording
+        )
 
         self.primaryRecordingShortcut = ShortcutMigration.migrateShortcutSelection(
             action: .primaryRecording,
@@ -289,6 +295,19 @@ class RecordingShortcutManager: ObservableObject {
             )
         case .quickAddToDictionary:
             DictionaryQuickAddManager.shared.toggle(modelContainer: engine.modelContext.container)
+        case .toggleMeetingRecording:
+            if MeetingRecorderController.shared.isRecording {
+                let mode = ModeManager.shared.currentEffectiveConfiguration
+                    ?? ModeManager.shared.enabledConfigurations.first
+                guard let mode else { return }
+                await MeetingRecorderController.shared.stop(
+                    modelContext: engine.modelContext,
+                    engine: engine,
+                    mode: mode
+                )
+            } else {
+                await MeetingRecorderController.shared.start()
+            }
         default:
             break
         }

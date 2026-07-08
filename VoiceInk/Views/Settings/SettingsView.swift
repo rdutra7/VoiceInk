@@ -92,6 +92,13 @@ struct SettingsView: View {
                         .controlSize(.small)
                 }
 
+                LabeledContent("Toggle Meeting Recording") {
+                    ShortcutRecorder(action: .toggleMeetingRecording) {
+                        recordingShortcutManager.updateShortcutStatus()
+                    }
+                        .controlSize(.small)
+                }
+
                 LabeledContent("Cancel Recording") {
                     HStack(spacing: 8) {
                         ShortcutRecorder(
