@@ -110,6 +110,18 @@ actor WhisperContext {
         return transcription
     }
 
+    func getSegments() -> [TranscriptionSegment] {
+        guard let context = context else { return [] }
+        var segments: [TranscriptionSegment] = []
+        for i in 0..<whisper_full_n_segments(context) {
+            let text = String(cString: whisper_full_get_segment_text(context, i))
+            let t0ms = whisper_full_get_segment_t0(context, i) * 10
+            let t1ms = whisper_full_get_segment_t1(context, i) * 10
+            segments.append(TranscriptionSegment(text: text, t0ms: t0ms, t1ms: t1ms))
+        }
+        return segments
+    }
+
     static func createContext(path: String) async throws -> WhisperContext {
         let whisperContext = WhisperContext()
         try await whisperContext.initializeModel(path: path)
@@ -162,6 +174,14 @@ actor WhisperContext {
     func setLanguage(_ language: String?) {
         self.language = language
     }
+}
+
+// MARK: - Segment Type
+
+struct TranscriptionSegment: Sendable {
+    let text: String
+    let t0ms: Int64
+    let t1ms: Int64
 }
 
 fileprivate func cpuCount() -> Int {

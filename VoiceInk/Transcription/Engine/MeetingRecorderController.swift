@@ -40,23 +40,23 @@ final class MeetingRecorderController: ObservableObject {
         }
     }
 
-    /// Stops the current meeting recording. Once the mixed WAV is finalized it is
-    /// enqueued in `AudioTranscriptionManager` so the existing pipeline transcribes
-    /// it (and tags the resulting `Transcription` as `recordingType="meeting"`).
+    /// Stops the current meeting recording. Once both WAV files (mic and system audio) are
+    /// finalized they are enqueued in `AudioTranscriptionManager` so the meeting pipeline
+    /// transcribes them separately and merges the result into a speaker-labelled dialogue.
     func stop(modelContext: ModelContext, engine: VoiceInkEngine, mode: ModeConfig) async {
         guard isRecording else { return }
         isRecording = false
-        let url = await recorder.stop()
+        let files = await recorder.stop()
         startedAt = nil
 
-        guard let url = url else {
-            logger.error("🎬 stop returned nil URL — no file to enqueue")
+        guard let files = files else {
+            logger.error("🎬 stop returned nil — no files to enqueue")
             return
         }
 
         let manager = AudioTranscriptionManager.shared
-        manager.addToQueue(urls: [url], recordingType: "meeting")
+        manager.addMeetingToQueue(micURL: files.micURL, systemURL: files.systemURL)
         manager.startProcessing(modelContext: modelContext, engine: engine, mode: mode)
-        logger.notice("🎬 Meeting enqueued for transcription → \(url.lastPathComponent, privacy: .public)")
+        logger.notice("🎬 Meeting enqueued for transcription → \(files.micURL.lastPathComponent, privacy: .public)")
     }
 }

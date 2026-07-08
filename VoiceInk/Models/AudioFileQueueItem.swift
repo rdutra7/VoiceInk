@@ -30,13 +30,19 @@ class AudioFileQueueItem: Identifiable, ObservableObject {
     /// Categorizes the source so the resulting `Transcription` can be tagged
     /// (e.g. "meeting" for MeetingRecorder output). nil = default dictation/import.
     let recordingType: String?
+    /// System-audio WAV URL for meeting items. nil for regular dictation/import.
+    let systemAudioURL: URL?
+
+    /// True when this item carries a system-audio companion for meeting transcription.
+    var isMeeting: Bool { systemAudioURL != nil }
 
     @Published var status: QueueItemStatus = .pending
     @Published var transcription: Transcription?
 
-    init(url: URL, recordingType: String? = nil) {
+    init(url: URL, systemAudioURL: URL? = nil, recordingType: String? = nil) {
         self.url = url
         self.filename = url.lastPathComponent
+        self.systemAudioURL = systemAudioURL
         self.recordingType = recordingType
     }
 }

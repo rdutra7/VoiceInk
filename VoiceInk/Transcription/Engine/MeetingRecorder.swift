@@ -5,14 +5,13 @@ import os
 // MARK: - Meeting Recorder
 //
 // Orchestrates a microphone capture (CoreAudioRecorder) and a system-audio capture
-// (SystemAudioRecorder) in parallel, mixes their streams with MeetingAudioMixer, and
-// produces a single WAV file ready for the existing transcription pipeline.
+// (SystemAudioRecorder) in parallel, producing two separate WAV files ready for the
+// meeting transcription pipeline (which transcribes each source independently and
+// interleaves the results into a speaker-labelled dialogue).
 //
-// Output: 16 kHz mono Int16 WAV at
-//   ~/Library/Application Support/com.prakashjoshipax.VoiceInk/Meetings/<timestamp>.wav
-//
-// Both source recorders also write their own temp WAV (required by the CoreAudio /
-// ExtAudioFile pattern); these are deleted on stop after the mixed WAV is closed.
+// Output files (16 kHz mono Int16 WAV) are placed at:
+//   ~/Library/Application Support/com.prakashjoshipax.VoiceInk/Meetings/<stamp>.mic.wav
+//   ~/Library/Application Support/com.prakashjoshipax.VoiceInk/Meetings/<stamp>.sys.wav
 @available(macOS 14.4, *)
 @MainActor
 final class MeetingRecorder {
@@ -21,11 +20,10 @@ final class MeetingRecorder {
 
     private let micRecorder = CoreAudioRecorder()
     private let systemRecorder = SystemAudioRecorder()
-    private let mixer = MeetingAudioMixer()
 
-    private var mixedURL: URL?
     private var micTempURL: URL?
     private var systemTempURL: URL?
+    private var stamp: String?
 
     private(set) var isRecording = false
     private(set) var startedAt: Date?
@@ -47,81 +45,84 @@ final class MeetingRecorder {
         // 2. Compute file paths
         let dir = try meetingsDirectory()
         let stamp = isoStamp(from: Date())
-        let mixedURL = dir.appendingPathComponent("\(stamp).wav")
         let micTempURL = dir.appendingPathComponent(".\(stamp).mic.tmp.wav")
         let systemTempURL = dir.appendingPathComponent(".\(stamp).sys.tmp.wav")
 
-        // 3. Open mixer first so feeders never get fed before file is ready
-        do {
-            try mixer.open(at: mixedURL)
-        } catch {
-            logger.error("🎬 mixer.open failed: \(error.localizedDescription, privacy: .public)")
-            throw error
-        }
-
-        // 4. Wire callbacks
-        micRecorder.onAudioChunk = { [weak self] data in
-            self?.mixer.feedMic(data)
-        }
-        systemRecorder.onAudioChunk = { [weak self] data in
-            self?.mixer.feedSystem(data)
-        }
-
-        // 5. Start mic
+        // 3. Start mic
         do {
             try micRecorder.startRecording(toOutputFile: micTempURL, deviceID: deviceID)
         } catch {
             logger.error("🎬 mic.startRecording failed: \(error.localizedDescription, privacy: .public)")
-            mixer.close()
-            try? FileManager.default.removeItem(at: mixedURL)
             throw MeetingRecorderError.micStartFailed(error)
         }
 
-        // 6. Start system audio
+        // 4. Start system audio
         do {
             try await systemRecorder.startRecording(toOutputFile: systemTempURL)
         } catch {
             logger.error("🎬 system.startRecording failed: \(error.localizedDescription, privacy: .public)")
             micRecorder.stopRecording()
-            mixer.close()
             try? FileManager.default.removeItem(at: micTempURL)
-            try? FileManager.default.removeItem(at: mixedURL)
             throw MeetingRecorderError.systemStartFailed(error)
         }
 
-        // 7. Remember paths
-        self.mixedURL = mixedURL
+        // 5. Remember paths
         self.micTempURL = micTempURL
         self.systemTempURL = systemTempURL
+        self.stamp = stamp
         self.startedAt = Date()
         self.isRecording = true
-        logger.notice("🎬 MeetingRecorder started → \(mixedURL.path, privacy: .public)")
+        logger.notice("🎬 MeetingRecorder started")
     }
 
-    /// Stops both sources, finalizes the mixed WAV, deletes the temp files, and returns
-    /// the URL of the final mixed WAV. Returns nil if no recording was active.
+    /// Stops both sources, renames the temp WAVs to their final names, and returns
+    /// the URLs of the two output files. Returns nil if no recording was active.
     @discardableResult
-    func stop() async -> URL? {
+    func stop() async -> MeetingRecordingFiles? {
         guard isRecording else { return nil }
         isRecording = false
 
         micRecorder.stopRecording()
         await systemRecorder.stopRecording()
-        mixer.close()
 
-        if let mic = micTempURL {
-            try? FileManager.default.removeItem(at: mic)
-        }
-        if let sys = systemTempURL {
-            try? FileManager.default.removeItem(at: sys)
+        guard let micTemp = micTempURL, let sysTemp = systemTempURL, let stamp = stamp else {
+            micTempURL = nil
+            systemTempURL = nil
+            self.stamp = nil
+            startedAt = nil
+            return nil
         }
 
-        let result = mixedURL
+        let dir = micTemp.deletingLastPathComponent()
+        let micFinalURL = dir.appendingPathComponent("\(stamp).mic.wav")
+        let sysFinalURL = dir.appendingPathComponent("\(stamp).sys.wav")
+
+        // Rename temp files to final names; fall back to temp URL on rename failure
+        let resolvedMicURL: URL
+        do {
+            try FileManager.default.moveItem(at: micTemp, to: micFinalURL)
+            resolvedMicURL = micFinalURL
+        } catch {
+            logger.error("🎬 Failed to rename mic temp file: \(error.localizedDescription, privacy: .public)")
+            resolvedMicURL = micTemp
+        }
+
+        let resolvedSysURL: URL
+        do {
+            try FileManager.default.moveItem(at: sysTemp, to: sysFinalURL)
+            resolvedSysURL = sysFinalURL
+        } catch {
+            logger.error("🎬 Failed to rename sys temp file: \(error.localizedDescription, privacy: .public)")
+            resolvedSysURL = sysTemp
+        }
+
         micTempURL = nil
         systemTempURL = nil
-        mixedURL = nil
+        self.stamp = nil
         startedAt = nil
-        logger.notice("🎬 MeetingRecorder stopped → \(result?.path ?? "(nil)", privacy: .public)")
+
+        let result = MeetingRecordingFiles(micURL: resolvedMicURL, systemURL: resolvedSysURL)
+        logger.notice("🎬 MeetingRecorder stopped → mic: \(resolvedMicURL.lastPathComponent, privacy: .public), sys: \(resolvedSysURL.lastPathComponent, privacy: .public)")
         return result
     }
 
@@ -157,6 +158,13 @@ final class MeetingRecorder {
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter.string(from: date)
     }
+}
+
+// MARK: - Return Value
+
+struct MeetingRecordingFiles {
+    let micURL: URL
+    let systemURL: URL
 }
 
 // MARK: - Error Types

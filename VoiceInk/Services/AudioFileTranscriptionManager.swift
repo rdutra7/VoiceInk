@@ -44,6 +44,22 @@ class AudioTranscriptionManager: ObservableObject {
         }
     }
 
+    /// Enqueue a meeting recording (two WAV files: mic + system audio).
+    /// Deduplicates by mic URL path — ignores the call if the mic path is already
+    /// pending/processing.
+    func addMeetingToQueue(micURL: URL, systemURL: URL) {
+        guard FileManager.default.fileExists(atPath: micURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: systemURL.path) else { return }
+
+        let path = micURL.standardizedFileURL.path
+        if queue.contains(where: { $0.url.standardizedFileURL.path == path && !$0.status.isTerminal }) {
+            return
+        }
+
+        let item = AudioFileQueueItem(url: micURL, systemAudioURL: systemURL, recordingType: "meeting")
+        queue.append(item)
+    }
+
     /// Remove a pending item from the queue.
     func removeFromQueue(id: UUID) {
         guard let index = queue.firstIndex(where: { $0.id == id }) else { return }
@@ -129,6 +145,14 @@ class AudioTranscriptionManager: ObservableObject {
                 throw TranscriptionError.noModelSelected
             }
             let currentModel = transcriptionConfiguration.model
+
+            // Route meeting items to the dedicated meeting pipeline
+            if item.isMeeting {
+                await processMeetingItem(item, modelContext: modelContext, engine: engine, mode: mode,
+                                         transcriptionConfiguration: transcriptionConfiguration, serviceRegistry: serviceRegistry)
+                await serviceRegistry.cleanup()
+                return
+            }
 
             // Phase: Loading
             item.status = .processing(phase: .loading)
@@ -274,6 +298,145 @@ class AudioTranscriptionManager: ObservableObject {
         }
 
         await serviceRegistry.cleanup()
+    }
+
+    // MARK: - Meeting Transcription Pipeline
+
+    /// Processes a meeting item: transcribes mic and system audio separately, merges
+    /// results into a speaker-labelled dialogue, and saves a Transcription with no
+    /// audioFileURL. On success the two WAV files are deleted (D3). On failure or
+    /// cancellation the files are kept so the item can be retried.
+    private func processMeetingItem(
+        _ item: AudioFileQueueItem,
+        modelContext: ModelContext,
+        engine: VoiceInkEngine,
+        mode: ModeConfig,
+        transcriptionConfiguration: TranscriptionRuntimeConfiguration,
+        serviceRegistry: TranscriptionServiceRegistry
+    ) async {
+        let currentModel = transcriptionConfiguration.model
+        let modeMetadata = transcriptionConfiguration.metadata
+        let micURL = item.url
+
+        guard let systemURL = item.systemAudioURL else {
+            item.status = .failed(message: "Missing system audio URL for meeting item")
+            return
+        }
+
+        do {
+            // Phase: Processing Audio
+            item.status = .processing(phase: .processingAudio)
+            try Task.checkCancellation()
+
+            let transcriptionStart = Date()
+            var finalText: String
+            var duration: TimeInterval
+
+            if currentModel.provider == .whisper {
+                // Whisper path: get segments per track, then merge by timestamp
+                let whisperService = serviceRegistry.localTranscriptionService
+
+                // Load mic samples → transcribe mic
+                let micSamples = try await audioProcessor.processAudioToSamples(micURL)
+                let micSampleCount = micSamples.count
+                try Task.checkCancellation()
+
+                item.status = .processing(phase: .transcribing)
+                let micSegments = try await whisperService.transcribeToSegments(
+                    samples: micSamples,
+                    model: currentModel,
+                    context: transcriptionConfiguration.requestContext
+                )
+                try Task.checkCancellation()
+
+                // Load sys samples (mic samples now eligible for ARC collection)
+                let sysSamples = try await audioProcessor.processAudioToSamples(systemURL)
+                let sysSampleCount = sysSamples.count
+                try Task.checkCancellation()
+
+                let sysSegments = try await whisperService.transcribeToSegments(
+                    samples: sysSamples,
+                    model: currentModel,
+                    context: transcriptionConfiguration.requestContext
+                )
+
+                duration = Double(max(micSampleCount, sysSampleCount)) / 16_000.0
+                finalText = MeetingTranscriptMerger.merge(mic: micSegments, system: sysSegments)
+
+            } else {
+                // Non-whisper fallback: transcribe each WAV whole, produce two labelled blocks
+                item.status = .processing(phase: .transcribing)
+
+                let micText = try await serviceRegistry.transcribe(
+                    audioURL: micURL,
+                    model: currentModel,
+                    context: transcriptionConfiguration.requestContext
+                )
+                try Task.checkCancellation()
+
+                let sysText = try await serviceRegistry.transcribe(
+                    audioURL: systemURL,
+                    model: currentModel,
+                    context: transcriptionConfiguration.requestContext
+                )
+
+                let micAsset = AVURLAsset(url: micURL)
+                let sysAsset = AVURLAsset(url: systemURL)
+                let micDuration = CMTimeGetSeconds(try await micAsset.load(.duration))
+                let sysDuration = CMTimeGetSeconds(try await sysAsset.load(.duration))
+                duration = max(micDuration, sysDuration)
+
+                var blocks: [String] = []
+                let trimmedMic = micText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmedSys = sysText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedMic.isEmpty { blocks.append("Eu: \(trimmedMic)") }
+                if !trimmedSys.isEmpty { blocks.append("Outro lado: \(trimmedSys)") }
+                finalText = blocks.joined(separator: "\n\n")
+            }
+
+            let transcriptionDuration = Date().timeIntervalSince(transcriptionStart)
+
+            // Apply post-processing (D6: filter + word replacements only, no paragraph formatting)
+            finalText = TranscriptionOutputFilter.filter(finalText)
+            finalText = WordReplacementService.shared.applyReplacements(to: finalText, using: modelContext)
+            try Task.checkCancellation()
+
+            // Save — audioFileURL is nil per D3 (WAVs will be deleted after save)
+            let transcription = Transcription(
+                text: finalText,
+                duration: duration,
+                audioFileURL: nil,
+                transcriptionModelName: currentModel.displayName,
+                promptName: nil,
+                transcriptionDuration: transcriptionDuration,
+                modeName: modeMetadata.name,
+                modeEmoji: modeMetadata.emoji
+            )
+            transcription.recordingType = "meeting"
+            transcription.transcriptionStatus = TranscriptionStatus.completed.rawValue
+
+            modelContext.insert(transcription)
+            try modelContext.save()
+            NotificationCenter.default.post(name: .transcriptionCreated, object: transcription)
+            NotificationCenter.default.post(name: .transcriptionCompleted, object: transcription)
+
+            item.transcription = transcription
+            item.status = .completed
+            lastCompletedItemId = item.id
+
+            // D3: Delete both WAV files after successful transcription
+            try? FileManager.default.removeItem(at: micURL)
+            try? FileManager.default.removeItem(at: systemURL)
+
+        } catch {
+            // D3: On failure or cancellation, keep WAV files for retry
+            if Task.isCancelled || error is CancellationError {
+                item.status = .pending
+            } else {
+                logger.error("Meeting transcription error: \(error, privacy: .public)")
+                item.status = .failed(message: error.localizedDescription)
+            }
+        }
     }
 }
 
