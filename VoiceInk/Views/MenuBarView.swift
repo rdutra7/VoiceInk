@@ -132,7 +132,7 @@ struct MenuBarView: View {
             Divider()
 
             if meetingRecorderController.isRecording {
-                Button("Stop Meeting Recording") {
+                Button {
                     Task {
                         let mode = ModeManager.shared.currentEffectiveConfiguration
                             ?? ModeManager.shared.enabledConfigurations.first
@@ -143,12 +143,16 @@ struct MenuBarView: View {
                             mode: mode
                         )
                     }
+                } label: {
+                    meetingRecordingLabel(title: "Stop Meeting Recording")
                 }
             } else {
-                Button("Start Meeting Recording") {
+                Button {
                     Task {
                         await meetingRecorderController.start()
                     }
+                } label: {
+                    meetingRecordingLabel(title: "Start Meeting Recording")
                 }
             }
 
@@ -176,6 +180,17 @@ struct MenuBarView: View {
 
             Button("Quit VoiceInk") {
                 NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+
+    private func meetingRecordingLabel(title: LocalizedStringKey) -> some View {
+        HStack {
+            Text(title)
+            if let shortcut = ShortcutStore.shortcut(for: .toggleMeetingRecording) {
+                Spacer()
+                Text(shortcut.displayString)
+                    .foregroundColor(.secondary)
             }
         }
     }
