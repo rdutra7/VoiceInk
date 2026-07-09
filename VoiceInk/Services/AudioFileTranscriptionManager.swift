@@ -302,6 +302,17 @@ class AudioTranscriptionManager: ObservableObject {
 
     // MARK: - Meeting Transcription Pipeline
 
+    /// Decides the terminal status and whether the source WAV files should be deleted
+    /// once a meeting transcript has been produced. A blank transcript (e.g. both tracks
+    /// were silent) is treated as a failure so the item stays retryable and the audio
+    /// is preserved instead of being destroyed with nothing to show for it.
+    nonisolated static func meetingCompletionOutcome(finalText: String) -> (status: QueueItemStatus, shouldDeleteSourceAudio: Bool) {
+        guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (.failed(message: "Meeting transcript was empty"), false)
+        }
+        return (.completed, true)
+    }
+
     /// Processes a meeting item: transcribes mic and system audio separately, merges
     /// results into a speaker-labelled dialogue, and saves a Transcription with no
     /// audioFileURL. On success the two WAV files are deleted (D3). On failure or
@@ -401,32 +412,41 @@ class AudioTranscriptionManager: ObservableObject {
             finalText = WordReplacementService.shared.applyReplacements(to: finalText, using: modelContext)
             try Task.checkCancellation()
 
-            // Save — audioFileURL is nil per D3 (WAVs will be deleted after save)
-            let transcription = Transcription(
-                text: finalText,
-                duration: duration,
-                audioFileURL: nil,
-                transcriptionModelName: currentModel.displayName,
-                promptName: nil,
-                transcriptionDuration: transcriptionDuration,
-                modeName: modeMetadata.name,
-                modeEmoji: modeMetadata.emoji
-            )
-            transcription.recordingType = "meeting"
-            transcription.transcriptionStatus = TranscriptionStatus.completed.rawValue
+            let outcome = Self.meetingCompletionOutcome(finalText: finalText)
 
-            modelContext.insert(transcription)
-            try modelContext.save()
-            NotificationCenter.default.post(name: .transcriptionCreated, object: transcription)
-            NotificationCenter.default.post(name: .transcriptionCompleted, object: transcription)
+            if case .completed = outcome.status {
+                // Save — audioFileURL is nil per D3 (WAVs will be deleted after save)
+                let transcription = Transcription(
+                    text: finalText,
+                    duration: duration,
+                    audioFileURL: nil,
+                    transcriptionModelName: currentModel.displayName,
+                    promptName: nil,
+                    transcriptionDuration: transcriptionDuration,
+                    modeName: modeMetadata.name,
+                    modeEmoji: modeMetadata.emoji
+                )
+                transcription.recordingType = "meeting"
+                transcription.transcriptionStatus = TranscriptionStatus.completed.rawValue
 
-            item.transcription = transcription
-            item.status = .completed
-            lastCompletedItemId = item.id
+                modelContext.insert(transcription)
+                try modelContext.save()
+                NotificationCenter.default.post(name: .transcriptionCreated, object: transcription)
+                NotificationCenter.default.post(name: .transcriptionCompleted, object: transcription)
 
-            // D3: Delete both WAV files after successful transcription
-            try? FileManager.default.removeItem(at: micURL)
-            try? FileManager.default.removeItem(at: systemURL)
+                item.transcription = transcription
+                item.status = outcome.status
+                lastCompletedItemId = item.id
+            } else {
+                logger.error("Meeting transcript was empty; keeping source audio for retry")
+                item.status = outcome.status
+            }
+
+            // D3: Delete both WAV files only when the outcome says it's safe to do so
+            if outcome.shouldDeleteSourceAudio {
+                try? FileManager.default.removeItem(at: micURL)
+                try? FileManager.default.removeItem(at: systemURL)
+            }
 
         } catch {
             // D3: On failure or cancellation, keep WAV files for retry
