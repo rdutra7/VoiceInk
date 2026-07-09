@@ -4,7 +4,7 @@
 #
 # Uso:
 #   ./build-sign-deploy.sh            # build + deploy + sign + verify
-#   ./build-sign-deploy.sh --no-build # pula 'make local', só re-assina o /Applications atual
+#   ./build-sign-deploy.sh --no-build # pula 'make local'; se houver build novo em ~/Downloads faz deploy dele, senão re-assina o /Applications atual
 #   ./build-sign-deploy.sh --regrant  # ao final, reseta TCC p/ forçar re-grant (1ª vez / cert novo)
 #
 # Pré-requisito: cert "VoiceInk Local Signing" na login keychain (ver SKILL.md p/ recriar).
@@ -42,12 +42,18 @@ echo "==> Fechar VoiceInk"
 osascript -e 'quit app "VoiceInk"' 2>/dev/null || true; sleep 2
 pkill -f "$APP/Contents/MacOS/VoiceInk" 2>/dev/null || true; sleep 1
 
-if [ "$DO_BUILD" = 1 ]; then
-  [ -d "$BUILT" ] || { echo "ERRO: build não encontrado em $BUILT" >&2; exit 1; }
+# Build (sem --no-build) tem de produzir o artefato; falhar aqui evita re-assinar app velho por engano.
+if [ "$DO_BUILD" = 1 ] && [ ! -d "$BUILT" ]; then
+  echo "ERRO: build não encontrado em $BUILT (make local não gerou o app?)" >&2; exit 1
+fi
+
+if [ -d "$BUILT" ]; then
   echo "==> Deploy: $BUILT -> $APP"
   rm -rf "$APP"; cp -R "$BUILT" "$APP"
   echo "==> Remover artefato de ~/Downloads (evita ícone duplicado no Spotlight/Launchpad)"
   rm -rf "$BUILT"
+else
+  echo "==> Sem artefato novo em ~/Downloads; re-assinando $APP no lugar"
 fi
 
 [ -d "$APP" ] || { echo "ERRO: $APP não existe (rode sem --no-build)" >&2; exit 1; }
