@@ -4,15 +4,16 @@ import os
 
 struct CustomCommandDeliveryContext {
     let transcript: String
+    var additionalEnvironment: [String: String] = [:]
 
     var standardInput: String {
         transcript
     }
 
     var environment: [String: String] {
-        [
-            "VOICEINK_TRANSCRIPT": transcript
-        ]
+        var env = additionalEnvironment
+        env["VOICEINK_TRANSCRIPT"] = transcript
+        return env
     }
 }
 

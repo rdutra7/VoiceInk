@@ -437,6 +437,11 @@ class AudioTranscriptionManager: ObservableObject {
                 item.transcription = transcription
                 item.status = outcome.status
                 lastCompletedItemId = item.id
+
+                // Post-meeting hook: pipe the transcript to a user-configured command.
+                if let stamp = MeetingRecoveryService.parse(filename: micURL.lastPathComponent)?.stamp {
+                    MeetingHookRunner.runIfConfigured(transcript: finalText, stamp: stamp, duration: duration)
+                }
             } else {
                 // Empty transcript is a permanent failure (silent audio): quarantine the WAVs
                 // in Meetings/failed/ so launch recovery doesn't re-enqueue them forever.

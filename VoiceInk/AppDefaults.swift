@@ -28,6 +28,7 @@ enum AppDefaults {
             "SelectedLanguage": "en",
             "AppendTrailingSpace": true,
             "RecorderType": "mini",
+            "MeetingOnStopCommand": "",
 
             // Cleanup
             "IsTranscriptionCleanupEnabled": false,
