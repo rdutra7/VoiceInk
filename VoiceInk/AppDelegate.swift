@@ -4,9 +4,22 @@ import UniformTypeIdentifiers
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     weak var menuBarManager: MenuBarManager?
-    
+    weak var engine: VoiceInkEngine?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuBarManager?.applyActivationPolicy()
+        recoverOrphanedMeetings()
+    }
+
+    // Re-enqueue meeting recordings orphaned by a crash / force-quit before the
+    // transcription pipeline consumed them. Runs off the launch critical path.
+    private func recoverOrphanedMeetings() {
+        guard let engine = engine else { return }
+        Task { @MainActor in
+            guard let mode = ModeManager.shared.currentEffectiveConfiguration
+                ?? ModeManager.shared.enabledConfigurations.first else { return }
+            MeetingRecoveryService.recover(engine: engine, mode: mode)
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

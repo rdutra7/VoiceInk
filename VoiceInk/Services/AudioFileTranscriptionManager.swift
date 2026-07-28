@@ -438,8 +438,11 @@ class AudioTranscriptionManager: ObservableObject {
                 item.status = outcome.status
                 lastCompletedItemId = item.id
             } else {
-                logger.error("Meeting transcript was empty; keeping source audio for retry")
+                // Empty transcript is a permanent failure (silent audio): quarantine the WAVs
+                // in Meetings/failed/ so launch recovery doesn't re-enqueue them forever.
+                logger.error("Meeting transcript was empty; quarantining source audio to failed/")
                 item.status = outcome.status
+                MeetingRecoveryService.quarantineFailedMeeting(micURL: micURL, systemURL: systemURL)
             }
 
             // D3: Delete both WAV files only when the outcome says it's safe to do so
