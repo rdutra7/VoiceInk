@@ -19,7 +19,15 @@ final class MeetingRecorder {
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "MeetingRecorder")
 
     private let micRecorder = CoreAudioRecorder()
+    // Set only when the opt-in AEC path is active; nil = default CoreAudioRecorder path.
+    private var voiceMicRecorder: VoiceProcessedMicRecorder?
     private let systemRecorder = SystemAudioRecorder()
+
+    /// The mic recorder in use for the current session. Off = the untouched
+    /// CoreAudioRecorder instance (behaviour byte-for-byte identical to before).
+    private var activeMic: MeetingMicRecording {
+        voiceMicRecorder ?? micRecorder
+    }
 
     private var micTempURL: URL?
     private var systemTempURL: URL?
@@ -48,9 +56,16 @@ final class MeetingRecorder {
         let micTempURL = dir.appendingPathComponent(".\(stamp).mic.tmp.wav")
         let systemTempURL = dir.appendingPathComponent(".\(stamp).sys.tmp.wav")
 
-        // 3. Start mic
+        // 3. Start mic. Opt-in echo cancellation (Apple voice processing) when the
+        //    MeetingMicVoiceProcessing default is set; otherwise the default path.
+        switch MeetingMicKind.resolve(voiceProcessingEnabled: UserDefaults.standard.bool(forKey: "MeetingMicVoiceProcessing")) {
+        case .voiceProcessed:
+            voiceMicRecorder = VoiceProcessedMicRecorder()
+        case .coreAudio:
+            voiceMicRecorder = nil
+        }
         do {
-            try micRecorder.startRecording(toOutputFile: micTempURL, deviceID: deviceID)
+            try activeMic.startRecording(toOutputFile: micTempURL, deviceID: deviceID)
         } catch {
             logger.error("🎬 mic.startRecording failed: \(error.localizedDescription, privacy: .public)")
             throw MeetingRecorderError.micStartFailed(error)
@@ -61,7 +76,8 @@ final class MeetingRecorder {
             try await systemRecorder.startRecording(toOutputFile: systemTempURL)
         } catch {
             logger.error("🎬 system.startRecording failed: \(error.localizedDescription, privacy: .public)")
-            micRecorder.stopRecording()
+            activeMic.stopRecording()
+            voiceMicRecorder = nil
             try? FileManager.default.removeItem(at: micTempURL)
             throw MeetingRecorderError.systemStartFailed(error)
         }
@@ -82,7 +98,8 @@ final class MeetingRecorder {
         guard isRecording else { return nil }
         isRecording = false
 
-        micRecorder.stopRecording()
+        activeMic.stopRecording()
+        voiceMicRecorder = nil
         await systemRecorder.stopRecording()
 
         guard let micTemp = micTempURL, let sysTemp = systemTempURL, let stamp = stamp else {
@@ -185,3 +202,18 @@ enum MeetingRecorderError: LocalizedError {
         }
     }
 }
+
+// MARK: - Mic Recorder Abstraction
+//
+// The minimal surface MeetingRecorder needs from a mic capture backend. Lets the
+// default CoreAudioRecorder and the opt-in VoiceProcessedMicRecorder be swapped
+// without touching the orchestration/rename logic.
+
+protocol MeetingMicRecording: AnyObject {
+    func startRecording(toOutputFile url: URL, deviceID: AudioDeviceID) throws
+    func stopRecording()
+}
+
+extension CoreAudioRecorder: MeetingMicRecording {}
+
+extension VoiceProcessedMicRecorder: MeetingMicRecording {}

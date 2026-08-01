@@ -29,6 +29,9 @@ enum AppDefaults {
             "AppendTrailingSpace": true,
             "RecorderType": "mini",
             "MeetingOnStopCommand": "",
+            // Opt-in echo cancellation (Apple voice processing) on the meeting mic channel.
+            // Off by default → meeting mic capture is byte-for-byte the CoreAudioRecorder path.
+            "MeetingMicVoiceProcessing": false,
 
             // Cleanup
             "IsTranscriptionCleanupEnabled": false,
