@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import CoreAudio
 import os
 
@@ -32,6 +33,8 @@ final class MeetingRecorder {
     private var micTempURL: URL?
     private var systemTempURL: URL?
     private var stamp: String?
+    private var micDeviceID: AudioDeviceID = 0
+    private var micRateAtStart: Double = 0
 
     private(set) var isRecording = false
     private(set) var startedAt: Date?
@@ -86,6 +89,8 @@ final class MeetingRecorder {
         self.micTempURL = micTempURL
         self.systemTempURL = systemTempURL
         self.stamp = stamp
+        self.micDeviceID = deviceID
+        self.micRateAtStart = Self.nominalSampleRate(of: deviceID)
         self.startedAt = Date()
         self.isRecording = true
         logger.notice("🎬 MeetingRecorder started")
@@ -97,6 +102,7 @@ final class MeetingRecorder {
     func stop() async -> MeetingRecordingFiles? {
         guard isRecording else { return nil }
         isRecording = false
+        let wallClock = startedAt.map { Date().timeIntervalSince($0) } ?? 0
 
         activeMic.stopRecording()
         voiceMicRecorder = nil
@@ -140,10 +146,50 @@ final class MeetingRecorder {
 
         let result = MeetingRecordingFiles(micURL: resolvedMicURL, systemURL: resolvedSysURL)
         logger.notice("🎬 MeetingRecorder stopped → mic: \(resolvedMicURL.lastPathComponent, privacy: .public), sys: \(resolvedSysURL.lastPathComponent, privacy: .public)")
+        logTiming(stamp: stamp, wallClock: wallClock, mic: resolvedMicURL, sys: resolvedSysURL)
         return result
     }
 
     // MARK: - Helpers
+
+    /// Appends one line per meeting to Meetings/timing.log comparing wall-clock time with
+    /// each track's length. A track much longer or shorter than the wall clock drifts, and
+    /// the merged dialogue comes out of order (the mic track was ~5% long on 2026-10-15,
+    /// with AirPods; cause not found yet). The unified log doesn't keep these for long.
+    private func logTiming(stamp: String, wallClock: TimeInterval, mic: URL, sys: URL) {
+        func seconds(_ url: URL) -> Double {
+            guard let file = try? AVAudioFile(forReading: url) else { return -1 }
+            return Double(file.length) / file.fileFormat.sampleRate
+        }
+        let deviceName = AudioDeviceManager.shared.getDeviceName(deviceID: micDeviceID) ?? "?"
+        let line = String(
+            format: "%@ wall=%.1fs mic=%.1fs sys=%.1fs micDevice=\"%@\" micRateAtStart=%.0f micRateAtStop=%.0f\n",
+            stamp, wallClock, seconds(mic), seconds(sys), deviceName,
+            micRateAtStart, Self.nominalSampleRate(of: micDeviceID)
+        )
+        logger.notice("🎬 timing: \(line, privacy: .public)")
+
+        let logURL = mic.deletingLastPathComponent().appendingPathComponent("timing.log")
+        if let handle = try? FileHandle(forWritingTo: logURL) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? line.write(to: logURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private static func nominalSampleRate(of deviceID: AudioDeviceID) -> Double {
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &rate)
+        return rate
+    }
 
     private func pickInputDeviceID() async -> AudioDeviceID {
         let manager = AudioDeviceManager.shared

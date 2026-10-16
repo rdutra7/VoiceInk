@@ -321,11 +321,7 @@ final class SystemAudioRecorder: NSObject, @unchecked Sendable {
         }
 
         // Convert
-        var error: NSError?
-        let conversionStatus = converter.convert(to: outputPCMBuffer, error: &error) { _, outStatus in
-            outStatus.pointee = .haveData
-            return inputPCMBuffer
-        }
+        let (conversionStatus, error) = Self.convert(inputPCMBuffer, with: converter, into: outputPCMBuffer)
 
         if conversionStatus == .error {
             logger.warning("🔊 AVAudioConverter error: \(error?.localizedDescription ?? "unknown", privacy: .public)")
@@ -338,6 +334,30 @@ final class SystemAudioRecorder: NSObject, @unchecked Sendable {
         }
 
         writeAndStream(samples: floatData, frameCount: Int(outputPCMBuffer.frameLength))
+    }
+
+    /// Converts one chunk, handing the converter the input exactly once. Answering
+    /// `.haveData` on every pull made AVAudioConverter re-read the same chunk until the
+    /// output buffer was full, adding ~16 duplicated frames per chunk (~4.7% extra audio
+    /// at 48 kHz → 16 kHz), so system-audio timestamps drifted later than the mic's over
+    /// a long meeting (+159 s on a 53-min recording on 2026-10-14).
+    static func convert(
+        _ input: AVAudioPCMBuffer,
+        with converter: AVAudioConverter,
+        into output: AVAudioPCMBuffer
+    ) -> (status: AVAudioConverterOutputStatus, error: NSError?) {
+        var error: NSError?
+        var consumed = false
+        let status = converter.convert(to: output, error: &error) { _, outStatus in
+            if consumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            outStatus.pointee = .haveData
+            return input
+        }
+        return (status, error)
     }
 
     private func writeAndStream(samples: UnsafePointer<Float>, frameCount: Int) {
