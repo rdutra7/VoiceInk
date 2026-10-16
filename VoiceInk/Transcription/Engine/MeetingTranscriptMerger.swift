@@ -53,4 +53,84 @@ enum MeetingTranscriptMerger {
         // 4. Render
         return turns.map { "\($0.label): \($0.text)" }.joined(separator: "\n\n")
     }
+
+    // MARK: - Repetition loops
+
+    /// Whisper sometimes gets stuck repeating one sentence over silence or noise (the mic
+    /// track of a 46-min meeting on 2026-10-15 came out as the same sentence dozens of
+    /// times). Within one track, a run of `minRun` or more identical consecutive sentences
+    /// (case and punctuation ignored) is collapsed to its first occurrence. Shorter repeats
+    /// ("Tchau. Tchau.") are left alone, and segments with nothing removed keep their
+    /// original text untouched. Returns how many sentences were removed.
+    static func collapseRepeatedSentences(
+        _ segments: [TranscriptionSegment],
+        minRun: Int = 4
+    ) -> (segments: [TranscriptionSegment], removedCount: Int) {
+        typealias Item = (segment: Int, sentence: String, key: String)
+        var items: [Item] = []
+        for (index, segment) in segments.enumerated() {
+            for sentence in sentences(in: segment.text) {
+                items.append((index, sentence, normalized(sentence)))
+            }
+        }
+
+        var dropped = Set<Int>()
+        var runStart = 0
+        for j in 0...items.count {
+            guard j == items.count || items[j].key != items[runStart].key else { continue }
+            if j - runStart >= minRun, !items[runStart].key.isEmpty {
+                dropped.formUnion((runStart + 1)..<j)
+            }
+            runStart = j
+        }
+        guard !dropped.isEmpty else { return (segments, 0) }
+
+        var kept = [[String]](repeating: [], count: segments.count)
+        var touched = Set<Int>()
+        for (j, item) in items.enumerated() {
+            if dropped.contains(j) {
+                touched.insert(item.segment)
+            } else {
+                kept[item.segment].append(item.sentence)
+            }
+        }
+
+        let result = segments.enumerated().map { index, segment in
+            guard touched.contains(index) else { return segment }
+            return TranscriptionSegment(
+                text: kept[index].joined(separator: " "),
+                t0ms: segment.t0ms,
+                t1ms: segment.t1ms
+            )
+        }
+        return (result, dropped.count)
+    }
+
+    /// Splits on `.`, `!`, `?` or `…` (runs of them) followed by whitespace or the end,
+    /// so "1.500" stays whole.
+    private static func sentences(in text: String) -> [String] {
+        let chars = Array(text)
+        let terminators: Set<Character> = [".", "!", "?", "…"]
+        var result: [String] = []
+        var current = ""
+        for (i, ch) in chars.enumerated() {
+            current.append(ch)
+            let next: Character? = i + 1 < chars.count ? chars[i + 1] : nil
+            if terminators.contains(ch), next == nil || next!.isWhitespace {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { result.append(trimmed) }
+                current = ""
+            }
+        }
+        let rest = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rest.isEmpty { result.append(rest) }
+        return result
+    }
+
+    private static func normalized(_ sentence: String) -> String {
+        sentence.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
 }

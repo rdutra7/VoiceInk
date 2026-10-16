@@ -305,13 +305,19 @@ class AudioTranscriptionManager: ObservableObject {
     /// Decides the terminal status and whether the source WAV files should be deleted
     /// once a meeting transcript has been produced. A blank transcript (e.g. both tracks
     /// were silent) is treated as a failure so the item stays retryable and the audio
-    /// is preserved instead of being destroyed with nothing to show for it.
-    nonisolated static func meetingCompletionOutcome(finalText: String) -> (status: QueueItemStatus, shouldDeleteSourceAudio: Bool) {
+    /// is preserved instead of being destroyed with nothing to show for it. `keepAudio`
+    /// keeps the WAVs of a completed meeting (a Whisper repetition loop was removed, so
+    /// the audio may still hold speech worth re-transcribing).
+    nonisolated static func meetingCompletionOutcome(finalText: String, keepAudio: Bool = false) -> (status: QueueItemStatus, shouldDeleteSourceAudio: Bool) {
         guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (.failed(message: "Meeting transcript was empty"), false)
         }
-        return (.completed, true)
+        return (.completed, !keepAudio)
     }
+
+    /// Below this many removed sentences a repeat is treated as noise worth cleaning, not
+    /// as a loop worth keeping ~200 MB of audio for.
+    nonisolated static let meetingLoopKeepAudioThreshold = 10
 
     /// Processes a meeting item: transcribes mic and system audio separately, merges
     /// results into a speaker-labelled dialogue, and saves a Transcription with no
@@ -342,6 +348,7 @@ class AudioTranscriptionManager: ObservableObject {
             let transcriptionStart = Date()
             var finalText: String
             var duration: TimeInterval
+            var loopWarning: String?
 
             if currentModel.provider == .whisper {
                 // Whisper path: get segments per track, then merge by timestamp
@@ -372,7 +379,17 @@ class AudioTranscriptionManager: ObservableObject {
                 )
 
                 duration = Double(max(micSampleCount, sysSampleCount)) / 16_000.0
-                finalText = MeetingTranscriptMerger.merge(mic: micSegments, system: sysSegments)
+                let mic = MeetingTranscriptMerger.collapseRepeatedSentences(micSegments)
+                let sys = MeetingTranscriptMerger.collapseRepeatedSentences(sysSegments)
+                finalText = MeetingTranscriptMerger.merge(mic: mic.segments, system: sys.segments)
+
+                var loopTracks: [String] = []
+                if mic.removedCount >= Self.meetingLoopKeepAudioThreshold { loopTracks.append("do microfone (\(mic.removedCount) frases)") }
+                if sys.removedCount >= Self.meetingLoopKeepAudioThreshold { loopTracks.append("do áudio da reunião (\(sys.removedCount) frases)") }
+                if !loopTracks.isEmpty {
+                    logger.notice("Meeting transcript had a repetition loop: mic=\(mic.removedCount, privacy: .public) sys=\(sys.removedCount, privacy: .public)")
+                    loopWarning = "⚠️ Aviso: a transcrição travou repetindo a mesma frase na trilha \(loopTracks.joined(separator: " e na trilha ")). As repetições foram removidas e o que foi dito nesses trechos pode ter se perdido. Os áudios foram guardados em Meetings/loop/ para transcrever de novo."
+                }
 
             } else {
                 // Non-whisper fallback: transcribe each WAV whole, produce two labelled blocks
@@ -412,7 +429,10 @@ class AudioTranscriptionManager: ObservableObject {
             finalText = WordReplacementService.shared.applyReplacements(to: finalText, using: modelContext)
             try Task.checkCancellation()
 
-            let outcome = Self.meetingCompletionOutcome(finalText: finalText)
+            let outcome = Self.meetingCompletionOutcome(finalText: finalText, keepAudio: loopWarning != nil)
+            if let loopWarning, case .completed = outcome.status {
+                finalText = loopWarning + "\n\n" + finalText
+            }
 
             if case .completed = outcome.status {
                 // Save — audioFileURL is nil per D3 (WAVs will be deleted after save)
@@ -441,6 +461,11 @@ class AudioTranscriptionManager: ObservableObject {
                 // Post-meeting hook: pipe the transcript to a user-configured command.
                 if let stamp = MeetingRecoveryService.parse(filename: micURL.lastPathComponent)?.stamp {
                     MeetingHookRunner.runIfConfigured(transcript: finalText, stamp: stamp, duration: duration)
+                }
+
+                // Keep looped meetings' audio out of the recovery scan (it would re-enqueue them).
+                if loopWarning != nil {
+                    MeetingRecoveryService.quarantineFailedMeeting(micURL: micURL, systemURL: systemURL, into: "loop")
                 }
             } else {
                 // Empty transcript is a permanent failure (silent audio): quarantine the WAVs

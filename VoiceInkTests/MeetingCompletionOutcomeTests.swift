@@ -20,4 +20,10 @@ struct MeetingCompletionOutcomeTests {
         #expect(outcome.status == .completed)
         #expect(outcome.shouldDeleteSourceAudio == true)
     }
+
+    @Test func loopedTranscriptCompletesButKeepsAudio() {
+        let outcome = AudioTranscriptionManager.meetingCompletionOutcome(finalText: "Eu: olá", keepAudio: true)
+        #expect(outcome.status == .completed)
+        #expect(outcome.shouldDeleteSourceAudio == false)
+    }
 }

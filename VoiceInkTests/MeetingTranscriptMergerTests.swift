@@ -53,4 +53,41 @@ struct MeetingTranscriptMergerTests {
         let result = MeetingTranscriptMerger.merge(mic: mic, system: sys)
         #expect(result == "Eu: Mic.\n\nOutro lado: Sys.")
     }
+
+    // (7) Whisper loop across and within segments collapses to the first occurrence
+    @Test func repetitionLoopCollapsed() {
+        let loop = "E aí, eu vou fazer o que eu estou com a gente."
+        let mic = [
+            seg(loop, t0ms: 0),
+            seg("\(loop) \(loop)", t0ms: 1000),
+            seg("e aí eu vou fazer o que eu estou com a gente!", t0ms: 2000),
+            seg(loop, t0ms: 3000),
+            seg("Qual o dia que vai funcionar?", t0ms: 4000),
+        ]
+        let (cleaned, removed) = MeetingTranscriptMerger.collapseRepeatedSentences(mic)
+        #expect(removed == 4)
+        #expect(cleaned.map(\.text) == [loop, "", "", "", "Qual o dia que vai funcionar?"])
+        #expect(cleaned.map(\.t0ms) == [0, 1000, 2000, 3000, 4000])
+        let merged = MeetingTranscriptMerger.merge(mic: cleaned, system: [])
+        #expect(merged == "Eu: \(loop) Qual o dia que vai funcionar?")
+    }
+
+    // (8) Short natural repeats are not touched
+    @Test func shortRepeatsKept() {
+        let mic = [seg("Tchau. Tchau. Tchau.", t0ms: 0), seg("Sim. Sim.", t0ms: 1000)]
+        let (cleaned, removed) = MeetingTranscriptMerger.collapseRepeatedSentences(mic)
+        #expect(removed == 0)
+        #expect(cleaned.map(\.text) == ["Tchau. Tchau. Tchau.", "Sim. Sim."])
+    }
+
+    // (9) Segments without removals keep their exact original text
+    @Test func untouchedSegmentsKeepOriginalText() {
+        let odd = "Custa 1.500 pontos...  certo?Sim"
+        let mic = [seg(odd, t0ms: 0), seg("Ok.", t0ms: 500), seg("Ok.", t0ms: 600),
+                   seg("Ok.", t0ms: 700), seg("Ok.", t0ms: 800)]
+        let (cleaned, removed) = MeetingTranscriptMerger.collapseRepeatedSentences(mic)
+        #expect(removed == 3)
+        #expect(cleaned[0].text == odd)
+        #expect(cleaned.map(\.text) == [odd, "Ok.", "", "", ""])
+    }
 }

@@ -98,11 +98,12 @@ enum MeetingRecoveryService {
             .appendingPathComponent("Meetings", isDirectory: true)
     }
 
-    /// Moves a failed meeting's two WAV files into `Meetings/failed/` so the recovery scan
-    /// won't re-enqueue an empty-transcript meeting on every launch. Best-effort.
-    nonisolated static func quarantineFailedMeeting(micURL: URL, systemURL: URL) {
+    /// Moves a failed meeting's two WAV files into `Meetings/failed/` (or another subfolder,
+    /// e.g. `loop/`) so the recovery scan won't re-enqueue the meeting on every launch.
+    /// Best-effort.
+    nonisolated static func quarantineFailedMeeting(micURL: URL, systemURL: URL, into folder: String = "failed") {
         let fm = FileManager.default
-        let failedDir = micURL.deletingLastPathComponent().appendingPathComponent("failed", isDirectory: true)
+        let failedDir = micURL.deletingLastPathComponent().appendingPathComponent(folder, isDirectory: true)
         try? fm.createDirectory(at: failedDir, withIntermediateDirectories: true)
         for url in [micURL, systemURL] {
             let dest = failedDir.appendingPathComponent(url.lastPathComponent)
