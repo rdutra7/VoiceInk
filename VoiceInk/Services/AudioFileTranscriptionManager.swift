@@ -319,6 +319,29 @@ class AudioTranscriptionManager: ObservableObject {
     /// as a loop worth keeping ~200 MB of audio for.
     nonisolated static let meetingLoopKeepAudioThreshold = 10
 
+    /// Transcribes one meeting track and collapses Whisper repetition loops. When a loop
+    /// reaches `meetingLoopKeepAudioThreshold`, the track is transcribed once more without
+    /// the initial prompt (so the retry isn't the same decode again) and the attempt with
+    /// fewer removed sentences wins; an empty retry never wins. Loops don't reproduce run
+    /// to run: the mic track that lost 38 sentences on 2026-10-21 came out clean when
+    /// re-transcribed with whisper-cli, with and without the prompt. `retriedFrom` is the
+    /// first attempt's removed count when it retried.
+    static func transcribeMeetingTrack(
+        prompt: String?,
+        transcribe: (_ prompt: String?) async throws -> [TranscriptionSegment]
+    ) async throws -> (segments: [TranscriptionSegment], removedCount: Int, retriedFrom: Int?) {
+        let first = MeetingTranscriptMerger.collapseRepeatedSentences(try await transcribe(prompt))
+        guard first.removedCount >= meetingLoopKeepAudioThreshold else {
+            return (first.segments, first.removedCount, nil)
+        }
+        try Task.checkCancellation()
+
+        let retry = MeetingTranscriptMerger.collapseRepeatedSentences(try await transcribe(nil))
+        let retryHasText = retry.segments.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let best = retryHasText && retry.removedCount < first.removedCount ? retry : first
+        return (best.segments, best.removedCount, first.removedCount)
+    }
+
     /// Processes a meeting item: transcribes mic and system audio separately, merges
     /// results into a speaker-labelled dialogue, and saves a Transcription with no
     /// audioFileURL. On success the two WAV files are deleted (D3). On failure or
@@ -360,11 +383,14 @@ class AudioTranscriptionManager: ObservableObject {
                 try Task.checkCancellation()
 
                 item.status = .processing(phase: .transcribing)
-                let micSegments = try await whisperService.transcribeToSegments(
-                    samples: micSamples,
-                    model: currentModel,
-                    context: transcriptionConfiguration.requestContext
-                )
+                let requestContext = transcriptionConfiguration.requestContext
+                let mic = try await Self.transcribeMeetingTrack(prompt: requestContext.prompt) { prompt in
+                    try await whisperService.transcribeToSegments(
+                        samples: micSamples,
+                        model: currentModel,
+                        context: TranscriptionRequestContext(language: requestContext.language, prompt: prompt)
+                    )
+                }
                 try Task.checkCancellation()
 
                 // Load sys samples (mic samples now eligible for ARC collection)
@@ -372,16 +398,31 @@ class AudioTranscriptionManager: ObservableObject {
                 let sysSampleCount = sysSamples.count
                 try Task.checkCancellation()
 
-                let sysSegments = try await whisperService.transcribeToSegments(
-                    samples: sysSamples,
-                    model: currentModel,
-                    context: transcriptionConfiguration.requestContext
-                )
+                let sys = try await Self.transcribeMeetingTrack(prompt: requestContext.prompt) { prompt in
+                    try await whisperService.transcribeToSegments(
+                        samples: sysSamples,
+                        model: currentModel,
+                        context: TranscriptionRequestContext(language: requestContext.language, prompt: prompt)
+                    )
+                }
 
                 duration = Double(max(micSampleCount, sysSampleCount)) / 16_000.0
-                let mic = MeetingTranscriptMerger.collapseRepeatedSentences(micSegments)
-                let sys = MeetingTranscriptMerger.collapseRepeatedSentences(sysSegments)
                 finalText = MeetingTranscriptMerger.merge(mic: mic.segments, system: sys.segments)
+
+                // The unified log doesn't keep this for long, so it also goes to timing.log.
+                if mic.retriedFrom != nil || sys.retriedFrom != nil {
+                    let micCount = mic.retriedFrom.map { "\($0)→\(mic.removedCount)" } ?? "\(mic.removedCount)"
+                    let sysCount = sys.retriedFrom.map { "\($0)→\(sys.removedCount)" } ?? "\(sys.removedCount)"
+                    let stamp = MeetingRecoveryService.parse(filename: micURL.lastPathComponent)?.stamp ?? "?"
+                    let line = "\(stamp) loopRetry mic=\(micCount) sys=\(sysCount)"
+                    logger.notice("Meeting track re-transcribed after a repetition loop: \(line, privacy: .public)")
+                    let logURL = micURL.deletingLastPathComponent().appendingPathComponent("timing.log")
+                    if let handle = try? FileHandle(forWritingTo: logURL) {
+                        handle.seekToEndOfFile()
+                        handle.write(Data((line + "\n").utf8))
+                        try? handle.close()
+                    }
+                }
 
                 var loopTracks: [String] = []
                 if mic.removedCount >= Self.meetingLoopKeepAudioThreshold { loopTracks.append("do microfone (\(mic.removedCount) frases)") }
